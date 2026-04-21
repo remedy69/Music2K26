@@ -1,5 +1,11 @@
 [phases.setup]
-aptPkgs = ["ffmpeg", "libsodium-dev", "python3-dev", "gcc"]
+aptPkgs = ["ffmpeg", "libsodium", "libsodium-dev"]
+
+[phases.install]
+cmds = [
+  "pip install --upgrade pip",
+  "pip install -r requirements.txt"
+]
 
 [start]
 cmd = "python3 bot.py"
