@@ -328,7 +328,7 @@ class MusicPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.blurple)
+    @discord.ui.button(emoji="⏯️", style=discord.ButtonStyle.blurple, custom_id="music_panel_pause_resume")
     async def pause_resume(self, interaction: discord.Interaction, button: discord.ui.Button):
         voice = interaction.guild.voice_client
         if not voice:
@@ -342,7 +342,7 @@ class MusicPanelView(discord.ui.View):
         else:
             await interaction.response.send_message("Nothing is playing.", ephemeral=True)
 
-    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.green)
+    @discord.ui.button(emoji="⏭️", style=discord.ButtonStyle.green, custom_id="music_panel_skip")
     async def skip(self, interaction: discord.Interaction, button: discord.ui.Button):
         voice = interaction.guild.voice_client
         if not voice or not (voice.is_playing() or voice.is_paused()):
@@ -350,7 +350,7 @@ class MusicPanelView(discord.ui.View):
         voice.stop()
         await interaction.response.send_message("Skipped.", ephemeral=True)
 
-    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.gray)
+    @discord.ui.button(emoji="🔁", style=discord.ButtonStyle.gray, custom_id="music_panel_loop")
     async def loop(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_state(interaction.guild.id)
         state.loop_mode = {"off": "track", "track": "queue", "queue": "off"}[state.loop_mode]
@@ -358,7 +358,7 @@ class MusicPanelView(discord.ui.View):
         await update_panel(interaction.guild)
         await interaction.response.send_message(f"Loop mode: `{state.loop_mode}`", ephemeral=True)
 
-    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.gray)
+    @discord.ui.button(emoji="📜", style=discord.ButtonStyle.gray, custom_id="music_panel_queue")
     async def queue(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_state(interaction.guild.id)
         if not state.queue:
@@ -366,7 +366,7 @@ class MusicPanelView(discord.ui.View):
         lines = [f"{idx}. {track.title}" for idx, track in enumerate(list(state.queue)[:10], start=1)]
         await interaction.response.send_message("\\n".join(lines), ephemeral=True)
 
-    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.red)
+    @discord.ui.button(emoji="⏹️", style=discord.ButtonStyle.red, custom_id="music_panel_stop")
     async def stop(self, interaction: discord.Interaction, button: discord.ui.Button):
         state = get_state(interaction.guild.id)
         state.queue.clear()
