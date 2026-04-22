@@ -1,6 +1,6 @@
 import asyncio
 import os
-import tempfile
+import random
 from collections import deque
 from dataclasses import dataclass
 from typing import Optional
@@ -11,83 +11,103 @@ import yt_dlp
 
 TOKEN = os.getenv("DISCORD_TOKEN", "").strip()
 PREFIX = os.getenv("COMMAND_PREFIX", "!").strip() or "!"
-YOUTUBE_COOKIES = os.getenv("YOUTUBE_COOKIES", "").strip()
 
 if not TOKEN:
-    raise RuntimeError("DISCORD_TOKEN is missing")
+    raise RuntimeError("DISCORD_TOKEN is missing.")
 
 intents = discord.Intents.default()
 intents.message_content = True
-intents.voice_states = True
 intents.guilds = True
+intents.voice_states = True
 
-bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
-
-
-@dataclass
-class QueuedTrack:
-    title: str
-    webpage_url: str
-    requested_by: str
-
-
-class GuildState:
-    def __init__(self) -> None:
-        self.queue: deque[QueuedTrack] = deque()
-        self.current: Optional[QueuedTrack] = None
-        self.loop: bool = False
-        self.volume: float = 0.5
-        self.cookies_file: Optional[str] = None
-
-
-states: dict[int, GuildState] = {}
-
-
-def get_state(guild_id: int) -> GuildState:
-    if guild_id not in states:
-        states[guild_id] = GuildState()
-    return states[guild_id]
-
+bot = commands.Bot(command_prefix=PREFIX, intents=intents)
 
 YDL_OPTIONS = {
     "format": "bestaudio/best",
-    "restrictfilenames": True,
-    "noplaylist": True,
-    "nocheckcertificate": True,
-    "ignoreerrors": False,
     "quiet": True,
-    "no_warnings": True,
+    "noplaylist": True,
     "default_search": "ytsearch",
     "source_address": "0.0.0.0",
 }
 
-if YOUTUBE_COOKIES:
-    fd, cookie_path = tempfile.mkstemp(suffix=".txt")
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        handle.write(YOUTUBE_COOKIES.replace("\\n", "\n"))
-    YDL_OPTIONS["cookiefile"] = cookie_path
+FFMPEG_BEFORE_OPTIONS = "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5"
+FFMPEG_OPTIONS = "-vn"
 
-FFMPEG_OPTIONS = {
-    "before_options": "-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5",
-    "options": "-vn",
+FILTERS = {
+    "off": "",
+    "bassboost": "bass=g=8",
+    "nightcore": "asetrate=48000*1.25,aresample=48000,atempo=1.1",
+    "vaporwave": "asetrate=48000*0.8,aresample=48000,atempo=1.0",
+    "karaoke": "pan=stereo|c0=c0-c1|c1=c1-c0",
 }
 
 
-def make_ydl() -> yt_dlp.YoutubeDL:
-    return yt_dlp.YoutubeDL(YDL_OPTIONS)
+@dataclass
+class Track:
+    title: str
+    webpage_url: str
+    stream_url: str
+    requested_by: str
 
 
-async def extract_info(query: str) -> dict:
-    def _extract() -> dict:
-        with make_ydl() as ydl:
-            data = ydl.extract_info(query, download=False)
-            if "entries" in data and data["entries"]:
-                data = next((entry for entry in data["entries"] if entry), None)
-            if not data:
+class GuildPlayer:
+    def __init__(self) -> None:
+        self.queue: deque[Track] = deque()
+        self.current: Optional[Track] = None
+        self.volume: int = 100
+        self.loop_mode: str = "off"  # off / track / queue
+        self.filter_name: str = "off"
+
+
+players: dict[int, GuildPlayer] = {}
+
+
+def get_player(guild_id: int) -> GuildPlayer:
+    if guild_id not in players:
+        players[guild_id] = GuildPlayer()
+    return players[guild_id]
+
+
+async def extract_track(query: str, requested_by: str) -> Track:
+    def _extract() -> Track:
+        with yt_dlp.YoutubeDL(YDL_OPTIONS) as ydl:
+            info = ydl.extract_info(query, download=False)
+
+            if "entries" in info and info["entries"]:
+                info = next((e for e in info["entries"] if e), None)
+
+            if not info:
                 raise RuntimeError("No results found.")
-            return data
+
+            stream_url = info.get("url")
+            title = info.get("title") or "Unknown title"
+            webpage_url = info.get("webpage_url") or query
+
+            if not stream_url:
+                raise RuntimeError("Could not get a playable stream URL.")
+
+            return Track(
+                title=title,
+                webpage_url=webpage_url,
+                stream_url=stream_url,
+                requested_by=requested_by,
+            )
 
     return await asyncio.to_thread(_extract)
+
+
+def build_source(stream_url: str, volume: int, filter_name: str) -> discord.PCMVolumeTransformer:
+    audio_filter = FILTERS.get(filter_name, "")
+    options = FFMPEG_OPTIONS
+    if audio_filter:
+        options += f' -af "{audio_filter}"'
+
+    source = discord.FFmpegPCMAudio(
+        stream_url,
+        before_options=FFMPEG_BEFORE_OPTIONS,
+        options=options,
+    )
+    return discord.PCMVolumeTransformer(source, volume=max(0.0, min(volume / 100.0, 2.0)))
 
 
 async def ensure_voice(ctx: commands.Context) -> discord.VoiceClient:
@@ -97,100 +117,84 @@ async def ensure_voice(ctx: commands.Context) -> discord.VoiceClient:
     vc = ctx.guild.voice_client
     if vc is None:
         return await ctx.author.voice.channel.connect()
+
     if vc.channel != ctx.author.voice.channel:
         await vc.move_to(ctx.author.voice.channel)
+
     return vc
 
 
-async def play_next(ctx: commands.Context) -> None:
-    state = get_state(ctx.guild.id)
-    vc = ctx.guild.voice_client
+async def start_next(guild: discord.Guild, text_channel: discord.TextChannel | discord.Thread | None = None) -> None:
+    player = get_player(guild.id)
+    vc = guild.voice_client
 
     if vc is None:
-        state.current = None
+        player.current = None
         return
 
-    if state.loop and state.current is not None:
-        next_track = state.current
-    elif state.queue:
-        next_track = state.queue.popleft()
-    else:
-        state.current = None
-        await vc.disconnect()
+    next_track: Optional[Track] = None
+
+    if player.loop_mode == "track" and player.current is not None:
+        next_track = player.current
+    elif player.queue:
+        if player.loop_mode == "queue" and player.current is not None:
+            player.queue.append(player.current)
+        next_track = player.queue.popleft()
+
+    if next_track is None:
+        player.current = None
+        try:
+            await vc.disconnect()
+        except Exception:
+            pass
         return
 
-    state.current = next_track
+    player.current = next_track
+    source = build_source(next_track.stream_url, player.volume, player.filter_name)
 
-    try:
-        info = await extract_info(next_track.webpage_url)
-        stream_url = info.get("url")
-        title = info.get("title") or next_track.title
-        if not stream_url:
-            raise RuntimeError("Could not get a playable stream URL.")
+    def after_play(error: Optional[Exception]) -> None:
+        if error:
+            print(f"Playback error: {error}")
+        fut = asyncio.run_coroutine_threadsafe(start_next(guild, text_channel), bot.loop)
+        try:
+            fut.result()
+        except Exception as exc:
+            print(f"Queue continuation error: {exc}")
 
-        source = discord.PCMVolumeTransformer(
-            discord.FFmpegPCMAudio(stream_url, **FFMPEG_OPTIONS),
-            volume=state.volume,
-        )
+    vc.play(source, after=after_play)
 
-        def _after_play(error: Optional[Exception]) -> None:
-            if error:
-                print(f"Playback error: {error}")
-            future = asyncio.run_coroutine_threadsafe(play_next(ctx), bot.loop)
-            try:
-                future.result()
-            except Exception as exc:
-                print(f"Queue continuation error: {exc}")
+    if text_channel:
+        try:
+            await text_channel.send(
+                f"🎶 **Now playing:** {next_track.title}\nRequested by: {next_track.requested_by}"
+            )
+        except discord.HTTPException:
+            pass
 
-        vc.play(source, after=_after_play)
-        await ctx.send(f"🎶 Now playing: **{title}**")
-    except Exception as exc:
-        await ctx.send(f"❌ Audio error: `{exc}`")
-        await play_next(ctx)
+
+@bot.event
+async def on_ready() -> None:
+    print(f"Bot ready as {bot.user} ({bot.user.id})")
 
 
 @bot.command(name="play")
-async def play(ctx: commands.Context, *, query: str) -> None:
-    state = get_state(ctx.guild.id)
+async def play_cmd(ctx: commands.Context, *, query: str) -> None:
     try:
         vc = await ensure_voice(ctx)
-        info = await extract_info(query)
-        track = QueuedTrack(
-            title=info.get("title") or query,
-            webpage_url=info.get("webpage_url") or query,
-            requested_by=str(ctx.author),
-        )
-        state.queue.append(track)
-        await ctx.send(f"✅ Added: **{track.title}**")
-        if not vc.is_playing() and not vc.is_paused() and state.current is None:
-            await play_next(ctx)
+        track = await extract_track(query, str(ctx.author))
+        player = get_player(ctx.guild.id)
+        player.queue.append(track)
+
+        if vc.is_playing() or vc.is_paused():
+            await ctx.send(f"➕ Added to queue: **{track.title}**")
+        else:
+            await start_next(ctx.guild, ctx.channel)
     except Exception as exc:
         await ctx.send(f"❌ {exc}")
 
 
-@bot.command(name="skip")
-async def skip(ctx: commands.Context) -> None:
-    vc = ctx.guild.voice_client
-    if vc and (vc.is_playing() or vc.is_paused()):
-        vc.stop()
-        await ctx.send("⏭ Skipped.")
-    else:
-        await ctx.send("Nothing is playing.")
-
-
-@bot.command(name="stop")
-async def stop(ctx: commands.Context) -> None:
-    state = get_state(ctx.guild.id)
-    state.queue.clear()
-    state.current = None
-    vc = ctx.guild.voice_client
-    if vc:
-        await vc.disconnect()
-    await ctx.send("⏹ Stopped and disconnected.")
-
-
 @bot.command(name="pause")
-async def pause(ctx: commands.Context) -> None:
+async def pause_cmd(ctx: commands.Context) -> None:
     vc = ctx.guild.voice_client
     if vc and vc.is_playing():
         vc.pause()
@@ -200,7 +204,7 @@ async def pause(ctx: commands.Context) -> None:
 
 
 @bot.command(name="resume")
-async def resume(ctx: commands.Context) -> None:
+async def resume_cmd(ctx: commands.Context) -> None:
     vc = ctx.guild.voice_client
     if vc and vc.is_paused():
         vc.resume()
@@ -209,54 +213,111 @@ async def resume(ctx: commands.Context) -> None:
         await ctx.send("Nothing is paused.")
 
 
+@bot.command(name="skip")
+async def skip_cmd(ctx: commands.Context) -> None:
+    vc = ctx.guild.voice_client
+    if vc and (vc.is_playing() or vc.is_paused()):
+        vc.stop()
+        await ctx.send("⏭ Skipped.")
+    else:
+        await ctx.send("Nothing to skip.")
+
+
+@bot.command(name="stop")
+async def stop_cmd(ctx: commands.Context) -> None:
+    vc = ctx.guild.voice_client
+    player = get_player(ctx.guild.id)
+    player.queue.clear()
+    player.current = None
+    if vc:
+        await vc.disconnect()
+        await ctx.send("⏹ Stopped and disconnected.")
+    else:
+        await ctx.send("Not connected.")
+
+
 @bot.command(name="queue")
 async def queue_cmd(ctx: commands.Context) -> None:
-    state = get_state(ctx.guild.id)
+    player = get_player(ctx.guild.id)
     lines = []
-    if state.current:
-        lines.append(f"**Now:** {state.current.title}")
-    for index, item in enumerate(list(state.queue)[:10], start=1):
-        lines.append(f"`{index}.` {item.title}")
+
+    if player.current:
+        lines.append(f"**Now:** {player.current.title}")
+
+    if player.queue:
+        for idx, track in enumerate(list(player.queue)[:10], start=1):
+            lines.append(f"`{idx}.` {track.title}")
+
     if not lines:
         await ctx.send("Queue is empty.")
         return
+
     await ctx.send("\n".join(lines))
 
 
 @bot.command(name="loop")
 async def loop_cmd(ctx: commands.Context, mode: str) -> None:
     mode = mode.lower().strip()
-    if mode not in {"on", "off"}:
-        await ctx.send("Use `!loop on` or `!loop off`.")
+    if mode not in {"off", "track", "queue"}:
+        await ctx.send("Use: `off`, `track`, or `queue`.")
         return
-    state = get_state(ctx.guild.id)
-    state.loop = mode == "on"
-    await ctx.send(f"🔁 Loop {'enabled' if state.loop else 'disabled' }.")
+
+    player = get_player(ctx.guild.id)
+    player.loop_mode = mode
+    await ctx.send(f"🔁 Loop mode set to **{mode}**.")
 
 
 @bot.command(name="volume")
-async def volume(ctx: commands.Context, amount: int) -> None:
+async def volume_cmd(ctx: commands.Context, amount: int) -> None:
     if amount < 0 or amount > 200:
         await ctx.send("Volume must be between 0 and 200.")
         return
-    state = get_state(ctx.guild.id)
-    state.volume = amount / 100.0
+
+    player = get_player(ctx.guild.id)
+    player.volume = amount
+
     vc = ctx.guild.voice_client
     if vc and vc.source and isinstance(vc.source, discord.PCMVolumeTransformer):
-        vc.source.volume = state.volume
-    await ctx.send(f"🔊 Volume set to {amount}%.")
+        vc.source.volume = max(0.0, min(amount / 100.0, 2.0))
+
+    await ctx.send(f"🔊 Volume set to **{amount}%**.")
 
 
-@bot.command(name="help")
-async def help_cmd(ctx: commands.Context) -> None:
+@bot.command(name="filter")
+async def filter_cmd(ctx: commands.Context, name: str) -> None:
+    name = name.lower().strip()
+    if name not in FILTERS:
+        await ctx.send(f"Available filters: {', '.join(FILTERS.keys())}")
+        return
+
+    player = get_player(ctx.guild.id)
+    player.filter_name = name
+    vc = ctx.guild.voice_client
+
+    if vc and player.current and (vc.is_playing() or vc.is_paused()):
+        current = player.current
+        vc.stop()
+        player.current = current
+        if player.loop_mode != "track":
+            player.queue.appendleft(current)
+
+    await ctx.send(f"🎛 Filter set to **{name}**.")
+
+
+@bot.command(name="helpmusic")
+async def helpmusic_cmd(ctx: commands.Context) -> None:
     await ctx.send(
-        "Commands: `!play <url or search>`, `!pause`, `!resume`, `!skip`, `!stop`, `!queue`, `!loop on|off`, `!volume <0-200>`"
+        "**Music commands**\n"
+        "`!play <url or search>`\n"
+        "`!pause`\n"
+        "`!resume`\n"
+        "`!skip`\n"
+        "`!stop`\n"
+        "`!queue`\n"
+        "`!loop off|track|queue`\n"
+        "`!volume 0-200`\n"
+        "`!filter off|bassboost|nightcore|vaporwave|karaoke`"
     )
-
-
-@bot.event
-async def on_ready() -> None:
-    print(f"Logged in as {bot.user} ({bot.user.id})")
 
 
 bot.run(TOKEN)
