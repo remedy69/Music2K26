@@ -116,7 +116,7 @@ def get_state(guild_id: int) -> GuildState:
     return guild_states[guild_id]
 
 
-# --- THE YT-DLP FIX IS RIGHT HERE ---
+# --- CORRECTED DICTIONARY FORMAT FOR PYTHON API ---
 ytdl_opts = {
     "format": "bestaudio/best",
     "noplaylist": False,
@@ -128,7 +128,10 @@ ytdl_opts = {
     "source_address": "0.0.0.0",
     "geo_bypass": True,
     "nocheckcertificate": True,
-    "js_runtimes": ["deno", "nodejs"] # This silences the warning and forces it to use Deno/Node
+    "js_runtimes": {
+        "deno": {},
+        "nodejs": {}
+    }
 }
 
 if YOUTUBE_COOKIES:
