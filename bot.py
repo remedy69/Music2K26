@@ -116,9 +116,12 @@ def get_state(guild_id: int) -> GuildState:
     return guild_states[guild_id]
 
 
-# --- CORRECTED DICTIONARY FORMAT FOR PYTHON API ---
+# --- THE FORMAT/CLIENT SPOOF FIX ---
 ytdl_opts = {
     "format": "bestaudio/best",
+    "extractor_args": {
+        "youtube": ["client=android,ios,web"] # This forces YouTube to serve mobile audio formats
+    },
     "noplaylist": False,
     "default_search": "ytsearch",
     "quiet": True,
