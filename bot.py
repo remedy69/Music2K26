@@ -116,11 +116,13 @@ def get_state(guild_id: int) -> GuildState:
     return guild_states[guild_id]
 
 
-# --- THE FORMAT/CLIENT SPOOF FIX ---
+# --- THE BULLETPROOF YT-DLP FIX ---
 ytdl_opts = {
-    "format": "bestaudio/best",
+    "format": "ba/b",
     "extractor_args": {
-        "youtube": ["client=android,ios,web"] # This forces YouTube to serve mobile audio formats
+        "youtube": {
+            "player_client": ["android", "web"]
+        }
     },
     "noplaylist": False,
     "default_search": "ytsearch",
